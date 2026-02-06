@@ -1,0 +1,133 @@
+import dotenv from "dotenv";
+import { fileURLToPath } from "url";
+import path from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// 🔥 Force-load .env (worker runs independently)
+dotenv.config({
+  path: path.resolve(__dirname, "../../.env")
+});
+
+import { Worker } from "bullmq";
+import IORedis from "ioredis";
+import { db } from "../db/index.js";
+
+// 🔍 Verify Redis config
+console.log(
+  "Redis:",
+  process.env.REDIS_HOST,
+  process.env.REDIS_PORT
+);
+
+// 🔥 Redis connection (BullMQ requirement)
+const connection = new IORedis({
+  host: process.env.REDIS_HOST,
+  port: Number(process.env.REDIS_PORT),
+  maxRetriesPerRequest: null
+});
+
+const worker = new Worker(
+  "event-delivery", // ✅ MUST MATCH QUEUE NAME
+  async (job) => {
+    console.log("📥 Job received:", job.id, job.data);
+
+    const { notificationId, userId } = job.data;
+
+    // 1️⃣ Fetch delivery record
+    const { rows } = await db.query(
+      `SELECT *
+       FROM notification_deliveries
+       WHERE notification_id = $1 AND user_id = $2`,
+      [notificationId, userId]
+    );
+
+    if (!rows.length) return;
+    const delivery = rows[0];
+
+    // Already processed
+    if (delivery.status === "SENT" || delivery.status === "FAILED") return;
+
+    // 2️⃣ Mark as processing
+    await db.query(
+      "UPDATE notification_deliveries SET status='PROCESSING' WHERE id=$1",
+      [delivery.id]
+    );
+
+    // Simulate delivery success/failure
+    const success = Math.random() > 0.3;
+
+    if (success) {
+      // 3️⃣ Fetch template
+      const templateResult = await db.query(
+        `SELECT t.title, t.body
+         FROM notifications n
+         JOIN notification_templates t ON n.template_id = t.id
+         WHERE n.id = $1`,
+        [notificationId]
+      );
+
+      if (!templateResult.rows.length) {
+        throw new Error("Template not found for notification");
+      }
+
+      const { body } = templateResult.rows[0];
+
+      // 4️⃣ Fetch user info
+      const userResult = await db.query(
+        "SELECT name FROM users WHERE id = $1",
+        [userId]
+      );
+
+      const userName = userResult.rows[0]?.name || "User";
+
+      // 5️⃣ Substitute template variables
+      const message = body.replace(/{{\s*name\s*}}/gi, userName);
+
+      // 6️⃣ Store rendered message
+      await db.query(
+        "INSERT INTO user_notifications (user_id, message) VALUES ($1, $2)",
+        [userId, message]
+      );
+
+      // 7️⃣ Mark delivery as sent
+      await db.query(
+        "UPDATE notification_deliveries SET status='SENT' WHERE id=$1",
+        [delivery.id]
+      );
+
+      console.log("✅ Notification delivered:", job.id);
+    } else {
+      // Retry / fail logic
+      if (delivery.retry_count >= 2) {
+        await db.query(
+          "UPDATE notification_deliveries SET status='FAILED' WHERE id=$1",
+          [delivery.id]
+        );
+        console.log("❌ Notification permanently failed:", job.id);
+      } else {
+        await db.query(
+          `UPDATE notification_deliveries
+           SET status='RETRYING', retry_count = retry_count + 1
+           WHERE id=$1`,
+          [delivery.id]
+        );
+        console.log("🔁 Retrying notification:", job.id);
+        throw new Error("Retrying delivery");
+      }
+    }
+  },
+  { connection }
+);
+
+// 🔔 Worker lifecycle logs
+worker.on("ready", () => {
+  console.log("🚀 Worker READY and listening to event-delivery queue");
+});
+
+worker.on("failed", (job, err) => {
+  console.error("❗ Job failed:", job?.id, err.message);
+});
+
+console.log("👷 Worker booted");
