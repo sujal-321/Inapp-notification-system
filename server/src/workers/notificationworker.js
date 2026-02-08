@@ -7,12 +7,21 @@ const __dirname = path.dirname(__filename);
 
 // 🔥 Force-load .env (worker runs independently)
 dotenv.config({
-  path: path.resolve(__dirname, "../../.env")
+  path: path.resolve(__dirname, "../../.env"),
+  override: true
 });
 
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { db } from "../db/index.js";
+import {
+  users,
+  notifications,
+  notificationTemplates,
+  notificationDeliveries,
+  userNotifications
+} from "../db/schema.js";
+import { eq, and } from "drizzle-orm";
 
 // 🔍 Verify Redis config
 console.log(
@@ -29,90 +38,94 @@ const connection = new IORedis({
 });
 
 const worker = new Worker(
-  "event-delivery", // ✅ MUST MATCH QUEUE NAME
+  "event-delivery",
   async (job) => {
     console.log("📥 Job received:", job.id, job.data);
 
     const { notificationId, userId } = job.data;
 
     // 1️⃣ Fetch delivery record
-    const { rows } = await db.query(
-      `SELECT *
-       FROM notification_deliveries
-       WHERE notification_id = $1 AND user_id = $2`,
-      [notificationId, userId]
-    );
+    const delivery = await db.query.notificationDeliveries.findFirst({
+      where: and(
+        eq(notificationDeliveries.notificationId, notificationId),
+        eq(notificationDeliveries.userId, userId)
+      )
+    });
 
-    if (!rows.length) return;
-    const delivery = rows[0];
+    if (!delivery) return;
 
     // Already processed
     if (delivery.status === "SENT" || delivery.status === "FAILED") return;
 
     // 2️⃣ Mark as processing
-    await db.query(
-      "UPDATE notification_deliveries SET status='PROCESSING' WHERE id=$1",
-      [delivery.id]
-    );
+    await db
+      .update(notificationDeliveries)
+      .set({ status: "PROCESSING" })
+      .where(eq(notificationDeliveries.id, delivery.id));
 
     // Simulate delivery success/failure
     const success = Math.random() > 0.3;
 
     if (success) {
-      // 3️⃣ Fetch template
-      const templateResult = await db.query(
-        `SELECT t.title, t.body
-         FROM notifications n
-         JOIN notification_templates t ON n.template_id = t.id
-         WHERE n.id = $1`,
-        [notificationId]
-      );
+      // 3️⃣ Fetch notification + template
+      const result = await db
+        .select({
+          body: notificationTemplates.body
+        })
+        .from(notifications)
+        .innerJoin(
+          notificationTemplates,
+          eq(notifications.templateId, notificationTemplates.id)
+        )
+        .where(eq(notifications.id, notificationId));
 
-      if (!templateResult.rows.length) {
+      if (!result.length) {
         throw new Error("Template not found for notification");
       }
 
-      const { body } = templateResult.rows[0];
+      const { body } = result[0];
 
       // 4️⃣ Fetch user info
-      const userResult = await db.query(
-        "SELECT name FROM users WHERE id = $1",
-        [userId]
-      );
+      const user = await db.query.users.findFirst({
+        where: eq(users.id, userId)
+      });
 
-      const userName = userResult.rows[0]?.name || "User";
+      const userName = user?.name || "User";
 
       // 5️⃣ Substitute template variables
       const message = body.replace(/{{\s*name\s*}}/gi, userName);
 
       // 6️⃣ Store rendered message
-      await db.query(
-        "INSERT INTO user_notifications (user_id, message) VALUES ($1, $2)",
-        [userId, message]
-      );
+      await db.insert(userNotifications).values({
+        userId,
+        message
+      });
 
       // 7️⃣ Mark delivery as sent
-      await db.query(
-        "UPDATE notification_deliveries SET status='SENT' WHERE id=$1",
-        [delivery.id]
-      );
+      await db
+        .update(notificationDeliveries)
+        .set({ status: "SENT" })
+        .where(eq(notificationDeliveries.id, delivery.id));
 
       console.log("✅ Notification delivered:", job.id);
     } else {
       // Retry / fail logic
-      if (delivery.retry_count >= 2) {
-        await db.query(
-          "UPDATE notification_deliveries SET status='FAILED' WHERE id=$1",
-          [delivery.id]
-        );
+      if (delivery.retryCount >= 2) {
+        await db
+          .update(notificationDeliveries)
+          .set({ status: "FAILED" })
+          .where(eq(notificationDeliveries.id, delivery.id));
+
         console.log("❌ Notification permanently failed:", job.id);
       } else {
-        await db.query(
-          `UPDATE notification_deliveries
-           SET status='RETRYING', retry_count = retry_count + 1
-           WHERE id=$1`,
-          [delivery.id]
-        );
+        await db
+          .update(notificationDeliveries)
+          .set({
+            status: "RETRYING",
+            retryCount: delivery.retryCount + 1
+          })
+          .where(eq(notificationDeliveries.id, delivery.id));
+
         console.log("🔁 Retrying notification:", job.id);
         throw new Error("Retrying delivery");
       }

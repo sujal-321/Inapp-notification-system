@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   createTemplate,
   getTemplates,
@@ -7,6 +7,8 @@ import {
   getActivity,
   getAllUsers
 } from "./api";
+
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,14 +23,38 @@ import {
   TableCell
 } from "@/components/ui/table";
 
-export default function Admin() {
-  const [templates, setTemplates] = useState([]);
-  const [usersList, setUsersList] = useState([]);
-  const [metrics, setMetrics] = useState([]);
-  const [activity, setActivity] = useState([]);
+/* ---------- helpers ---------- */
+function normalizeActivityResponse(res) {
+  // If backend returns { data, totalPages }
+  if (res && typeof res === "object" && Array.isArray(res.data)) {
+    return {
+      rows: res.data,
+      totalPages: res.totalPages ?? 1
+    };
+  }
 
+  // If backend returns array directly
+  if (Array.isArray(res)) {
+    return {
+      rows: res,
+      totalPages: 1
+    };
+  }
+
+  return { rows: [], totalPages: 1 };
+}
+
+function formatDate(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  return isNaN(d) ? "—" : d.toLocaleString();
+}
+
+export default function Admin() {
+  const queryClient = useQueryClient();
+
+  /* ---------------- UI STATE ---------------- */
   const [activityPage, setActivityPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
 
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -37,36 +63,57 @@ export default function Admin() {
   const [selectedUsers, setSelectedUsers] = useState([]);
   const [sendToAll, setSendToAll] = useState(false);
 
-  useEffect(() => {
-    getTemplates().then(setTemplates);
-    getAllUsers().then(setUsersList);
+  /* ---------------- QUERIES ---------------- */
 
-    setTimeout(() => {
-      getMetrics().then(setMetrics);
-      loadActivity(activityPage);
-    }, 200);
-  }, []);
+  const { data: templates = [] } = useQuery({
+    queryKey: ["templates"],
+    queryFn: getTemplates
+  });
 
-  useEffect(() => {
-    loadActivity(activityPage);
-  }, [activityPage]);
+  const { data: usersList = [] } = useQuery({
+    queryKey: ["users"],
+    queryFn: getAllUsers
+  });
 
-  async function loadActivity(page) {
-    const res = await getActivity(page, 5);
-    setActivity(res.data);
-    setTotalPages(res.totalPages);
-  }
+  const { data: metrics = [] } = useQuery({
+    queryKey: ["metrics"],
+    queryFn: getMetrics
+  });
 
-  async function handleCreateTemplate() {
-    if (!title || !body) return;
+  const {
+    data: rawActivityRes,
+    isFetching: activityLoading
+  } = useQuery({
+    queryKey: ["activity", activityPage],
+    queryFn: () => getActivity(activityPage, 5),
+    keepPreviousData: true
+  });
 
-    const newTemplate = await createTemplate({ title, body });
-    setTitle("");
-    setBody("");
-    setTemplateId(String(newTemplate.id));
+  /* 🔥 normalize response */
+  const { rows: activity, totalPages } =
+    normalizeActivityResponse(rawActivityRes);
 
-    setTemplates(await getTemplates());
-  }
+  /* ---------------- MUTATIONS ---------------- */
+
+  const createTemplateMutation = useMutation({
+    mutationFn: createTemplate,
+    onSuccess: (newTemplate) => {
+      queryClient.invalidateQueries(["templates"]);
+      setTemplateId(String(newTemplate.id));
+      setTitle("");
+      setBody("");
+    }
+  });
+
+  const triggerMutation = useMutation({
+    mutationFn: triggerNotification,
+    onSuccess: () => {
+      queryClient.invalidateQueries(["metrics"]);
+      queryClient.invalidateQueries(["activity"]);
+    }
+  });
+
+  /* ---------------- HANDLERS ---------------- */
 
   function toggleUser(userId) {
     setSelectedUsers(prev =>
@@ -81,17 +128,16 @@ export default function Admin() {
     setSelectedUsers(checked ? usersList.map(u => u.id) : []);
   }
 
-  async function handleTrigger() {
+  function handleTrigger() {
     if (!templateId || selectedUsers.length === 0) return;
 
-    await triggerNotification({
+    triggerMutation.mutate({
       templateId: Number(templateId),
       userIds: selectedUsers
     });
-
-    getMetrics().then(setMetrics);
-    loadActivity(activityPage);
   }
+
+  /* ---------------- UI ---------------- */
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 space-y-10">
@@ -124,7 +170,13 @@ export default function Admin() {
               value={body}
               onChange={e => setBody(e.target.value)}
             />
-            <Button className="w-full" onClick={handleCreateTemplate}>
+            <Button
+              className="w-full"
+              onClick={() =>
+                createTemplateMutation.mutate({ title, body })
+              }
+              disabled={createTemplateMutation.isLoading}
+            >
               Create & Select Template
             </Button>
           </CardContent>
@@ -213,6 +265,12 @@ export default function Admin() {
         <CardContent>
           <h3 className="text-lg font-semibold mb-4">Activity Log</h3>
 
+          {activity.length === 0 && !activityLoading && (
+            <p className="text-muted-foreground text-sm">
+              No activity found.
+            </p>
+          )}
+
           <Table>
             <TableHeader>
               <TableRow>
@@ -228,9 +286,7 @@ export default function Admin() {
                   <TableCell>{a.user_id}</TableCell>
                   <TableCell>{a.template_title}</TableCell>
                   <TableCell>{a.status}</TableCell>
-                  <TableCell>
-                    {new Date(a.created_at).toLocaleString()}
-                  </TableCell>
+                  <TableCell>{formatDate(a.created_at)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -247,6 +303,7 @@ export default function Admin() {
 
             <span className="text-sm text-muted-foreground">
               Page {activityPage} of {totalPages}
+              {activityLoading && " (loading...)"}
             </span>
 
             <Button

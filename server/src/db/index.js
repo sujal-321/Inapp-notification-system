@@ -2,28 +2,34 @@ import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import path from "path";
 
+import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
+import * as schema from "./schema.js";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 🔥 Explicit path to .env (server/.env)
+// 🔥 Explicitly load .env from server root
 dotenv.config({
   path: path.resolve(__dirname, "../../.env"),
   override: true
 });
 
-import pkg from "pg";
-const { Pool } = pkg;
-
 if (!process.env.DATABASE_URL) {
-  console.error("❌ DATABASE_URL still missing");
+  console.error("❌ DATABASE_URL is missing");
   process.exit(1);
 }
 
-console.log("✅ DB ENV loaded, connecting to Neon with SSL");
+console.log("✅ DATABASE_URL loaded, connecting to Neon via Drizzle");
 
-export const db = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+// 🔐 Neon-safe postgres client
+const client = postgres(process.env.DATABASE_URL, {
+  ssl: "require",
+  max: 10
+});
+
+// 🧠 Drizzle DB instance
+export const db = drizzle(client, {
+  schema,
+  logger: false
 });

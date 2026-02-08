@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+
 import {
   getUserNotifications,
   markRead,
@@ -15,46 +17,61 @@ import {
   DialogFooter
 } from "@/components/ui/dialog";
 
-export default function User() {
-  const [users, setUsers] = useState([]);
-  const [userId, setUserId] = useState(null);
+/* ---------- SAFE DATE FORMAT ---------- */
+function formatDate(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString();
+}
 
-  const [notifications, setNotifications] = useState([]);
+export default function User() {
+  const queryClient = useQueryClient();
+
+  const [userId, setUserId] = useState(null);
   const [selected, setSelected] = useState(null);
   const [open, setOpen] = useState(false);
 
-  // Load users once
-  useEffect(() => {
-    getAllUsers().then(data => {
-      setUsers(data);
-      if (data.length) {
-        setUserId(data[0].id); // default to first user
-      }
-    });
-  }, []);
+  /* ---------------- USERS LIST ---------------- */
 
-  // Load notifications when user changes
+  const { data: users = [] } = useQuery({
+    queryKey: ["users"],
+    queryFn: getAllUsers
+  });
+
+  // set default user once users load
   useEffect(() => {
-    if (userId) {
-      loadNotifications();
+    if (users.length && !userId) {
+      setUserId(users[0].id);
     }
-  }, [userId]);
+  }, [users, userId]);
 
-  async function loadNotifications() {
-    const data = await getUserNotifications(userId);
-    setNotifications(data);
-  }
+  /* ---------------- NOTIFICATIONS ---------------- */
 
-  async function handleMarkRead() {
-    if (!selected) return;
+  const {
+    data: notifications = [],
+    isLoading
+  } = useQuery({
+    queryKey: ["notifications", userId],
+    queryFn: () => getUserNotifications(userId),
+    enabled: !!userId,
+    refetchInterval: 10000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
+    keepPreviousData: true
+  });
 
-    await markRead(selected.id);
-    setOpen(false);
-    setSelected(null);
-    loadNotifications();
-  }
+  /* ---------------- MARK AS READ ---------------- */
 
-  const unreadCount = notifications.filter(n => !n.is_read).length;
+  const markReadMutation = useMutation({
+    mutationFn: markRead,
+    onSuccess: () => {
+      queryClient.invalidateQueries(["notifications", userId]);
+      setOpen(false);
+      setSelected(null);
+    }
+  });
+
+  const unreadCount = notifications.filter(n => !n.isRead).length;
 
   return (
     <div className="space-y-6">
@@ -76,7 +93,7 @@ export default function User() {
         </select>
       </div>
 
-      {/* Notification Header */}
+      {/* Notifications Header */}
       <div className="flex items-center justify-between">
         <h3 className="text-xl font-semibold">Your Notifications</h3>
 
@@ -87,8 +104,15 @@ export default function User() {
         )}
       </div>
 
+      {/* Initial loading only */}
+      {isLoading && (
+        <p className="text-muted-foreground">
+          Loading notifications…
+        </p>
+      )}
+
       {/* Empty state */}
-      {notifications.length === 0 && (
+      {!isLoading && notifications.length === 0 && (
         <p className="text-muted-foreground">
           No notifications for this user.
         </p>
@@ -99,7 +123,7 @@ export default function User() {
         <Card
           key={notification.id}
           className={
-            notification.is_read
+            notification.isRead
               ? "opacity-60"
               : "border-primary"
           }
@@ -107,22 +131,21 @@ export default function User() {
           <CardContent className="flex justify-between items-center py-4">
             <div>
               <p className="font-medium">
-                {notification.message.slice(0, 60)}
-                {notification.message.length > 60 && "..."}
+                {notification.message}
               </p>
 
               <p className="text-sm text-muted-foreground">
-                {new Date(notification.created_at).toLocaleString()}
+                {formatDate(notification.createdAt)}
               </p>
 
-              {!notification.is_read && (
+              {!notification.isRead && (
                 <span className="inline-block mt-1 text-xs bg-green-600 text-white px-2 py-0.5 rounded">
                   New
                 </span>
               )}
             </div>
 
-            {!notification.is_read && (
+            {!notification.isRead && (
               <Button
                 variant="outline"
                 onClick={() => {
@@ -151,14 +174,16 @@ export default function User() {
               </p>
 
               <p className="text-sm text-muted-foreground">
-                Received on{" "}
-                {new Date(selected.created_at).toLocaleString()}
+                Received on {formatDate(selected.createdAt)}
               </p>
             </div>
           )}
 
           <DialogFooter>
-            <Button onClick={handleMarkRead}>
+            <Button
+              onClick={() => markReadMutation.mutate(selected.id)}
+              disabled={markReadMutation.isLoading}
+            >
               Mark as read
             </Button>
           </DialogFooter>

@@ -14,8 +14,13 @@
     "bullmq": "^5.67.3",
     "cors": "^2.8.6",
     "dotenv": "^17.2.4",
+    "drizzle-orm": "^0.45.1",
     "express": "^5.2.1",
     "ioredis": "^5.9.2",
-    "pg": "^8.18.0"
+    "pg": "^8.18.0",
+    "postgres": "^3.4.8"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.8"
   }
 }
